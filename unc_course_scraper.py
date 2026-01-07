@@ -124,9 +124,11 @@ class UNCCourseScraper:
                     self.log("Using first text input as subject field")
             
             if subject_field:
-                self.log(f"Filling subject field with: {self.course_subject} {self.course_number}")
+                # Search for course without section number to get ALL sections
+                search_query = f"{self.course_subject} {self.course_number}"
+                self.log(f"Filling subject field with: {search_query} (will search ALL sections)")
                 subject_field.clear()
-                subject_field.send_keys(f"{self.course_subject} {self.course_number}")
+                subject_field.send_keys(search_query)
                 self.log("Subject field filled successfully")
             else:
                 self.log("ERROR: Could not find subject field", "ERROR")
@@ -324,17 +326,21 @@ class UNCCourseScraper:
             rows = table.find_all('tr')[1:] if table.find('tr') else []
             self.log(f"Found {len(rows)} data row(s) to process")
             
+            # Helper function to extract cell value
+            def get_cell(index, default=""):
+                if index is not None and index < len(cells):
+                    return cells[index].get_text(strip=True)
+                return default
+            
+            # Track the current course we're processing (for handling continuation rows)
+            current_course_match = False
+            
             for row in rows:
                 cells = row.find_all(['td', 'th'])
                 if len(cells) < 5:  # Need at least some columns
                     continue
                 
                 # Extract data using column indices if available, otherwise use position
-                def get_cell(index, default=""):
-                    if index is not None and index < len(cells):
-                        return cells[index].get_text(strip=True)
-                    return default
-                
                 subject = get_cell(col_indices.get('subject', 0))
                 catalog_number = get_cell(col_indices.get('catalog', 1))
                 class_section = get_cell(col_indices.get('section', 3))
@@ -349,17 +355,32 @@ class UNCCourseScraper:
                 instructor = get_cell(col_indices.get('instructor', 12))
                 available_seats_text = get_cell(col_indices.get('available_seats', 13))
                 
-                # Check if this is a JAPN 162 course
-                # Subject might be empty for subsequent rows of same course
+                # Check if this row belongs to the target course
+                # Strategy:
+                # 1. If subject and catalog match exactly, it's a match
+                # 2. If subject is empty but we're already in a matching course, include it (continuation row)
+                # 3. Reset match status if we encounter a different course
+                
                 is_target_course = False
-                if subject and subject == self.course_subject:
-                    if catalog_number == self.course_number:
+                
+                # Check for explicit match
+                if subject and subject.strip() == self.course_subject.strip():
+                    if catalog_number and catalog_number.strip() == self.course_number.strip():
                         is_target_course = True
-                elif not subject or subject == "":
-                    # Empty subject might mean it's a continuation row for same course
-                    # Check if we have section number and it matches pattern
-                    if class_section and class_section.isdigit():
+                        current_course_match = True
+                        self.log(f"Found matching course row: {self.course_subject} {self.course_number} - Section {class_section}")
+                    else:
+                        # Different catalog number, reset
+                        current_course_match = False
+                elif (not subject or subject.strip() == "") and current_course_match:
+                    # Continuation row - subject is empty, but we're still processing target course
+                    # Include it if it has a section number (indicates it's a section of the same course)
+                    if class_section and class_section.strip():
                         is_target_course = True
+                        self.log(f"Found continuation row for matching course: Section {class_section}")
+                else:
+                    # Different course or no match, reset
+                    current_course_match = False
                 
                 if is_target_course:
                     # Parse available seats
@@ -384,9 +405,19 @@ class UNCCourseScraper:
                         'available_seats': available_seats
                     }
                     courses.append(course_info)
-                    self.log(f"Found section {class_section}: {available_seats} seat(s) available")
+                    self.log(f"Added section {class_section} (Class #{class_number}): {available_seats} seat(s) available")
+                else:
+                    # Log skipped rows for debugging
+                    if subject or catalog_number:
+                        self.log(f"Skipped row: {subject} {catalog_number} (not target course)", "DEBUG")
             
-            self.log(f"Parsing complete: found {len(courses)} matching course section(s)", "SUCCESS")
+            self.log(f"Parsing complete: found {len(courses)} matching course section(s) for {self.course_subject} {self.course_number}", "SUCCESS")
+            
+            if len(courses) == 0:
+                self.log("WARNING: No sections found! This might indicate:", "WARNING")
+                self.log("  - Course doesn't exist for the selected term", "WARNING")
+                self.log("  - Search didn't return results", "WARNING")
+                self.log("  - Table parsing issue", "WARNING")
             return courses
             
         except Exception as e:
